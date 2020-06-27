@@ -7,6 +7,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"math/big"
 	"time"
@@ -279,19 +280,22 @@ func (sd *SignedData) VerifySignature(cert *x509.Certificate) error {
 		return err
 	}
 
-	// Marshal the Signed Attributes
-	derbytes, err := asn1.Marshal(signer.SignedAttrs)
+	seq, err := asn1.Marshal(struct {
+		Attributes `asn1:"set"`
+	}{signer.SignedAttrs})
+
 	if err != nil {
 		return err
 	}
 
-	// Hack the DER bytes of the Signed Attributes to be EXPLICIT SET
-	derbytes[0] = 0x31
-	derbytes[1] = 0x81
+	var raw asn1.RawValue
+	if _, err = asn1.Unmarshal(seq, &raw); err != nil {
+		return err
+	}
 
 	// Hash the DER bytes
 	hash := hashAlgo.Hash.New()
-	hash.Write(derbytes)
+	hash.Write(raw.Bytes)
 	digest := hash.Sum(nil)
 
 	// Unpack the public key
@@ -344,15 +348,18 @@ func (sd *SignedData) GetCertificates() ([]*x509.Certificate, error) {
 	return x509.ParseCertificates(sd.Certificates.Bytes)
 }
 
+// Attributes ...
+type Attributes []Attribute
+
 // SignerInfo is a shared-standard as defined by RFC 2630
 type SignerInfo struct {
 	Version            int           `asn1:"default:1"`
 	SID                asn1.RawValue // CHOICE. See SignerInfo.GetSID()
 	DigestAlgorithm    pkix.AlgorithmIdentifier
-	SignedAttrs        []Attribute `asn1:"tag:0"`
+	SignedAttrs        Attributes `asn1:"tag:0"`
 	SignatureAlgorithm pkix.AlgorithmIdentifier
 	Signature          []byte
-	UnsignedAtrributes []Attribute `asn1:"optional,tag:1"`
+	UnsignedAtrributes Attributes `asn1:"optional,tag:1"`
 }
 
 // GetSID Gets the certificate identifier
@@ -446,12 +453,29 @@ type TSTInfo struct {
 	Policy         asn1.ObjectIdentifier `json:"policy"`                           // Identifier for the policy. For many TSA's, often the same as SignedData.DigestAlgorithm
 	MessageImprint MessageImprint        `json:"message-imprint"`                  // MUST have the same value of MessageImprint in matching TimeStampReq
 	SerialNumber   *big.Int              `json:"serial-number"`                    // Time-Stamping users MUST be ready to accommodate integers up to 160 bits
-	GenTime        time.Time             `json:"gen-time"`                         // The time at which it was stamped
+	GenTime        asn1.RawValue         `json:"gen-time"`                         // The time at which it was stamped. Using a raw value because fractions are not supported by asn1 package. See https://go-review.googlesource.com/c/go/+/108355/3/src/encoding/asn1/asn1.go#363 for the fix.
 	Accuracy       Accuracy              `json:"accuracy" asn1:"optional"`         // Accuracy represents the time deviation around the UTC time.
 	Ordering       bool                  `json:"ordering" asn1:"optional"`         // True if SerialNumber increases monotonically with time.
 	Nonce          *big.Int              `json:"nonce" asn1:"optional"`            // MUST be present if the similar field was present in TimeStampReq.  In that case it MUST have the same value.
 	TSA            asn1.RawValue         `json:"tsa" asn1:"optional,tag:0"`        // This is a CHOICE (See RFC 3280 for all choices). See https://github.com/golang/go/issues/13999 for information on handling.
 	Extensions     []pkix.Extension      `json:"extensions" asn1:"optional,tag:1"` // List of extensions
+}
+
+// Time returns the time at which it was stamped.
+// See https://go-review.googlesource.com/c/go/+/108355/3/src/encoding/asn1/asn1.go#363
+func (t TSTInfo) Time() (ret time.Time, err error) {
+	const formatStr = "20060102150405.999999999Z0700"
+	s := string(t.GenTime.Bytes)
+
+	if ret, err = time.Parse(formatStr, s); err != nil {
+		return
+	}
+
+	if serialized := ret.Format(formatStr); serialized != s {
+		err = fmt.Errorf("asn1: time did not serialize back to the original value and may be invalid: given %q, but serialized as %q", s, serialized)
+	}
+
+	return
 }
 
 // Accuracy represents the time deviation around the UTC time.
