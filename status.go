@@ -1,9 +1,44 @@
 package rfc3161
 
+import (
+	"encoding/asn1"
+	"errors"
+	"strings"
+)
+
+// PKIFreeText ::= SEQUENCE SIZE (1..MAX) OF UTF8String
+type PKIFreeText []asn1.RawValue
+
+// Append returns a new copy of the PKIFreeText with the provided string
+// appended.
+func (ft PKIFreeText) Append(t string) PKIFreeText {
+	return append(ft, asn1.RawValue{
+		Class: asn1.ClassUniversal,
+		Tag:   asn1.TagUTF8String,
+		Bytes: []byte(t),
+	})
+}
+
+// Strings decodes the PKIFreeText into a []string.
+func (ft PKIFreeText) Strings() ([]string, error) {
+	strs := make([]string, len(ft))
+
+	for i := range ft {
+		if rest, err := asn1.Unmarshal(ft[i].FullBytes, &strs[i]); err != nil {
+			return nil, err
+
+		} else if len(rest) != 0 {
+			return nil, errors.New("trailing data after PKIFreeText")
+		}
+	}
+
+	return strs, nil
+}
+
 // PKIStatusInfo contains complete information about the status of the Time Stamp Response
 type PKIStatusInfo struct {
 	Status       PKIStatus
-	StatusString string         `asn1:"optional,utf8"`
+	StatusString PKIFreeText    `asn1:"optional"`
 	FailInfo     PKIFailureInfo `asn1:"optional"`
 }
 
@@ -13,9 +48,16 @@ func (si *PKIStatusInfo) Error() string {
 	if si.Status.IsError() {
 		output += ": " + si.FailInfo.Error()
 	}
-	if si.StatusString != "" {
-		output += ": " + si.StatusString
+
+	statusString := ""
+	if ft, err := si.StatusString.Strings(); err == nil && len(ft) > 0 {
+		statusString = strings.Join(ft, " :: ")
 	}
+
+	if statusString != "" {
+		output += ": " + statusString
+	}
+
 	return output
 }
 
